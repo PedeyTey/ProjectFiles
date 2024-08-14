@@ -1,0 +1,126 @@
+/*******************************************************************************
+*
+* McStas, neutron ray-tracing package
+*         Copyright (C) 1997-2008, All rights reserved
+*         Risoe National Laboratory, Roskilde, Denmark
+*         Institut Laue Langevin, Grenoble, France
+*
+* Instrument: incoherent_validation
+*
+* %Identification
+* Written by: Mads Bertelsen
+* Date: May 2016
+* Origin: Johns Hopkins University, Baltimore
+* Version: $Revision: 0.1 $
+*
+* Validation of union network against incoherent scattering component
+*
+* %Description
+* simple test instrument for sample component.
+*
+* Example: filename="source_sct091_tu_02_1.dat" Detector: det_I=9.89304e+09
+*
+* %End
+*******************************************************************************/
+
+DEFINE INSTRUMENT 1D_GPR_HB_demonstration(A3=30,atom_distance=1.3,sample_radius=0.01,sample_height=0.01, pack=1, geometry_interact=0.4)
+
+DECLARE
+%{
+int s_events;
+%}
+
+USERVARS
+%{
+int s_events;
+%}
+
+INITIALIZE
+%{
+#define __USE_MISC
+#define _GNU_SOURCE
+#include <glob.h>
+%}
+
+TRACE
+
+COMPONENT init = Union_init()
+AT (0,0,0) ABSOLUTE
+
+
+/*
+COMPONENT test_AF_HB_1D = AF_HB_1D_process(atom_distance=atom_distance,unit_cell_volume=50,J_interaction=1,packing_factor=1)
+AT (0,0,0) ABSOLUTE
+*/
+
+COMPONENT test_GPR_1D = GPR_HB_1D_process(atom_distance=atom_distance, J_interaction=1, covariance_parameter=0.1, cov_coherence_parameter=0.1, noise_value=1e-4, pattern = "./12x1x1_antiRedo.f2.m0.szz")
+AT (0,0,0) ABSOLUTE
+
+
+COMPONENT test_sample = Union_make_material(my_absorption=100*0.001/10*pack,process_string="test_GPR_1D")
+AT (0,0,0) ABSOLUTE
+
+COMPONENT a1 = Progress_bar()
+  AT (0,0,0) ABSOLUTE
+
+COMPONENT source = Source_div(
+//        xwidth=0.0005, yheight=0.0005,focus_aw=15, focus_ah=15,
+        xwidth=0.001, yheight=0.001,focus_aw=0.05, focus_ah=0.05,
+        E0 = 25, dE = 0, flux=1E10)
+  AT (0,0,0) RELATIVE a1 ROTATED (0,0,0) RELATIVE a1
+
+COMPONENT sample_position = Arm()
+AT (0,0,1) RELATIVE a1
+ROTATED (0,0,0) RELATIVE a1
+
+
+COMPONENT cylinder_sample_union = Union_cylinder(radius=sample_radius, yheight=sample_height, priority=1, material_string="test_sample",p_interact = geometry_interact)
+    //target_index=2,focus_ah=34,focus_aw=180)
+AT (0,0,0) RELATIVE sample_position
+ROTATED (0,A3,0) RELATIVE sample_position
+
+
+COMPONENT test_master = Union_master()
+AT(0,0,1) RELATIVE a1
+ROTATED (0,0,0) RELATIVE a1
+EXTEND %{
+s_events = number_of_scattering_events;
+%}
+
+
+COMPONENT stop = Union_stop()
+AT (0,0,0) ABSOLUTE
+
+COMPONENT focus_target = Arm()
+AT (0.5,0,0) RELATIVE sample_position
+
+COMPONENT detector_2theta_E_single = Monitor_nD(
+xwidth=1,yheight=0.30,
+options="banana, theta limits=[0,180] bins=721, E limits=[10,25] bins=1500"
+,restore_neutron=1,filename="2theta_E_single.dat") WHEN (s_events == 1)
+AT (0,0,0) RELATIVE sample_position
+ROTATED (0,0,0) RELATIVE sample_position
+
+COMPONENT detector_2theta_E = Monitor_nD(
+xwidth=1,yheight=0.30,
+options="banana, theta limits=[0,180] bins=721, E limits=[10,25] bins=1500"
+,restore_neutron=1,filename="2theta_E.dat") WHEN (s_events >= 1)
+AT (0,0,0) RELATIVE sample_position
+ROTATED (0,0,0) RELATIVE sample_position
+
+COMPONENT m4pi = PSD_monitor_4PI(radius=2, nx=180, ny=180, filename="4Pi_events.dat",restore_neutron=1)
+  AT (0, 0, 0) RELATIVE sample_position
+
+COMPONENT m4pi_scat = PSD_monitor_4PI(radius=2, nx=180, ny=180, filename="4Pi_events_scat.dat",restore_neutron=1)
+WHEN (s_events >= 1)
+  AT (0, 0, 0) RELATIVE sample_position
+
+COMPONENT PSD_transmission = PSD_monitor(xmin=-0.05,xmax=0.05,ymin=-0.05,ymax=0.05, nx=100, ny=100, filename="transmitted.dat",restore_neutron = 1) WHEN (s_events==0)
+AT (0,0,0.5) RELATIVE sample_position
+
+FINALLY
+%{
+%}
+
+END
+

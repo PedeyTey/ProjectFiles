@@ -1,0 +1,806 @@
+/*******************************************************************************
+*INDEHOLDER ALT FOR SIMPEL LØSNING MED KUN AT BRUGE 18x1x1-FILEN
+*
+*  McStas, neutron ray-tracing package
+*  Copyright(C) 2007 Risoe National Laboratory.
+*
+* %I
+* Written by: Mads Bertelsen
+* Date: 20.08.15
+* Version: $Revision: 0.1 $
+* Origin: University of Copenhagen
+*
+* 1D Antiferromagnetic Heisenberg chain
+*
+* %D
+*
+* 1D Antiferromagnetic Heisenberg chain
+*
+* Part of the Union components, a set of components that work together and thus
+*  sperates geometry and physics within McStas.
+* The use of this component requires other components to be used.
+*
+* 1) One specifies a number of processes using process components like this one
+* 2) These are gathered into material definitions using Union_make_material
+* 3) Geometries are placed using Union_box / Union_cylinder, assigned a material
+* 4) A Union_master component placed after all of the above
+*
+* Only in step 4 will any simulation happen, and per default all geometries
+*  defined before the master, but after the previous will be simulated here.
+*
+* There is a dedicated manual available for the Union_components
+*
+*
+* Algorithm:
+* Described elsewhere
+*
+* %P
+* INPUT PARAMETERS:
+* unit_cell_volume:  [AA^3]     Unit cell volume (set either unit_cell_volume or number density)
+* number_density:    [1/AA^3]   Number of scatteres per volume
+* J_interaction:     [meV]      Exchange constant
+* A_constant:        [unitless] Constant from Müller paper 1981, probably somewhere between 1 and 1.5
+* atom_distance:     [AA]       Distance between atom's in chain
+* packing_factor:    [1]        How dense is the material compared to optimal 0-1
+* interact_fraction: [1]        How large a part of the scattering events should use this process 0-1 (sum of all processes in material = 1)
+* init:              [string] name of Union_init component (typically "init", default)
+*
+* OUTPUT PARAMETERS:
+* Template_storage          // Important to update this output paramter
+* effective_my_scattering   // Variable used in initialize
+*
+*
+*
+* %L
+*
+* %E
+******************************************************************************/
+
+DEFINE COMPONENT GPR_HB_1D_process // Remember to change the name of process here
+DEFINITION PARAMETERS ()
+SETTING PARAMETERS(atom_distance=1, number_density=0, unit_cell_volume=173.28, J_interaction=1, packing_factor=1, interact_fraction=-1, string init="init", covariance_parameter=0.1, cov_coherence_parameter=0.1, noise_value=1e-4, string pattern = "./12x1x1_antiRedo.f2.m0.szz")
+OUTPUT PARAMETERS ()
+DEPENDENCY "-I@MCCODE_LIB@/miniconda3/include -Wl,-rpath,@MCCODE_LIB@/miniconda3/lib -L@MCCODE_LIB@/miniconda3/lib -lgsl -lgslcblas -lm -D_GNU_SOURCE"
+
+SHARE
+%{
+#ifndef Union
+#define Union $Revision: 0.8 $
+
+%include "Union_functions.c"
+%include "Union_initialization.c"
+
+#endif
+
+
+#define _GNU_SOURCE
+// GSL libraries
+#include <gsl/gsl_matrix.h>
+#include <gsl/gsl_blas.h>
+#include <gsl/gsl_linalg.h>
+#include <gsl/gsl_rng.h>
+#include <gsl/gsl_randist.h>
+
+// Math library
+#include <math.h>
+
+// Glob, used for creating a list of files
+#define __USE_MISC
+#define _GNU_SOURCE
+#include <glob.h>
+
+struct physical_constants_GPR_HB_1D{
+    // List of constants to be passed between functions
+    double a; // Scattering length
+    double J; // Interaction strength
+    double A; // Constant from Müller conjecture
+    double Atom_dist; // Distance between atoms
+    double q2unit_less;
+    double integral_pre_factor;
+    double noise; //Noise in the GPR
+    //double weight_factor;
+};
+
+// Very important to add a pointer to this struct in the Union_functions.c file
+struct GPR_HB_1D_physics_storage_struct{
+    // Variables that needs to be transfered between any of the following places:
+    // The initialize in this component
+    // The function for calculating my
+    // The function for calculating scattering
+    
+    double current_total_cross_section;
+    double number_density_internal;
+    struct physical_constants_GPR_HB_1D physical_constants;
+
+    //Specifically for RLspectra
+    int length;
+    gsl_matrix *initInvMat;
+    gsl_matrix *coords;
+    gsl_matrix *values;
+    gsl_matrix *noiseMat;
+    gsl_matrix *pureCovMat;
+    gsl_matrix *sumMat;
+    gsl_matrix *predictionCoordsMat;
+    gsl_matrix *predictionMat;
+    gsl_matrix *covarianceMat;
+    gsl_matrix *tempMat;
+    gsl_matrix *transMat;
+    gsl_matrix *mixCovMat;
+    double parameters[2];
+};
+
+//RLspectra functions
+void inversion_error_handler(const char * reason, const char * file, int line, int gsl_errno){
+    printf("GSL error: %s\n", reason);
+    printf("Trying again\n");
+}
+
+void find_min_max(double* array, int length, double* min, double* max){
+    *min = array[0];
+    *max = array[0];
+    for(int i = 1; i < length; i++) {
+        if (array[i] < *min) {
+            *min = array[i];
+        }
+        if (array[i] > *max) {
+            *max = array[i];
+        }
+    }
+}
+
+int test_inverse(gsl_matrix *original, gsl_matrix *inverse, double precision){
+    gsl_matrix *prod = gsl_matrix_alloc(original->size1, original->size2);
+
+    gsl_blas_dgemm(CblasNoTrans, CblasNoTrans, 1.0, original, inverse, 0.0, prod);
+    for (size_t i = 0; i < original->size1; i++)
+    {
+        for (size_t j = 0; j < original->size2; j++)
+        {
+            if (i == j)
+            {
+                if (!(fabs(gsl_matrix_get(prod, i, j)) < 1 + precision))
+                {
+                    printf("Precision issues on diag: size = %f\n", fabs(gsl_matrix_get(prod, i, j)));
+                    return 0;
+                }
+            }
+
+            else
+            {
+                if (!fabs(gsl_matrix_get(prod, i, j) < precision))
+                {
+                    printf("Precision issues off diag: size = %f\n", fabs(gsl_matrix_get(prod, i, j)));
+                    return 0;
+                }
+            }
+        }
+    }
+    return 1;
+
+
+    gsl_matrix_free(prod);
+}
+
+int invert_matrix(gsl_matrix *m, gsl_matrix **inverse){
+    gsl_error_handler_t *old_handler;
+    old_handler = gsl_set_error_handler(inversion_error_handler);
+    int s;
+    size_t n;
+    n = m->size1;
+    gsl_matrix *copy;
+    copy = gsl_matrix_alloc(n, n);
+    gsl_permutation *p;
+    p = gsl_permutation_alloc(n);
+
+    gsl_matrix_memcpy(copy, m);
+    gsl_linalg_LU_decomp(copy, p, &s);
+    int status;
+    status = gsl_linalg_LU_invert(copy, p, *inverse);
+    
+    gsl_permutation_free(p);
+    gsl_matrix_free(copy);
+
+    gsl_set_error_handler(old_handler);
+    return status == GSL_SUCCESS ? 1 : 0;
+}
+
+double sqrCovFunc(double *x1, double *x2, double sigma, double l){
+    double sum = 0;
+    for (int i = 0; i < 2; i++) {
+        sum += pow(x1[i] - x2[i], 2);
+    }
+    return sigma * sigma * exp(-sum / (2 * l * l));
+}
+
+void cov_matrix(gsl_matrix* result, gsl_matrix* x1, gsl_matrix* x2, double* parameters){
+    size_t i, j;
+    for(i = 0; i < x1->size1; i++)
+    {
+        for(j = 0; j < x2->size1; j++) 
+        {
+            double coords1[2] = {gsl_matrix_get(x1, i, 0), gsl_matrix_get(x1, i, 1)};
+            double coords2[2] = {gsl_matrix_get(x2, j, 0), gsl_matrix_get(x2, j, 1)};
+            double val = sqrCovFunc(coords1, coords2, parameters[0], parameters[1]);
+            gsl_matrix_set(result, i, j, val);
+        }
+    }
+}
+
+int readFile(const char *filename, double **qArray, double **eArray, double **szzArray){
+    FILE *file_pointer;
+    char line[200]; // Assuming each line in the file is no longer than 200 characters
+    char *char_ptr;
+    char *char_ptr_end;
+
+    int appendCount = 0;
+    int qCount = 0;
+    double totSzz = 0;
+
+    double *qList;
+    double *eList;
+    double *szzList;
+
+    // Open the file in read mode
+    file_pointer = fopen(filename, "r");
+
+    // Check if the file opened successfully
+    if (file_pointer == NULL)
+    {
+        printf("Error opening file.\n");
+        return 0;
+    }
+
+    int lineCount = 0;
+    char ch;
+
+    while ((ch = fgetc(file_pointer)) != EOF)
+    {
+        if (ch == '\n')
+        {
+            lineCount++;
+        }
+    }
+    // Rewinding the file to read from it again.
+    rewind(file_pointer);
+
+    // Dynamical memory allocation to reduce it later
+    qList = (double*)malloc(lineCount * sizeof(double));
+    eList = (double*)malloc(lineCount * sizeof(double));
+    szzList = (double*)malloc(lineCount * sizeof(double));
+
+    // Read each line of the file
+    while (fgets(line, sizeof(line), file_pointer) != NULL)
+    {
+
+        // reading of q-elements
+        char_ptr = strchr(line, 'q');
+        double qVal;
+        char qText[200] = "";
+        // If the string contains "q=", it will read off the q-value
+        if ((char_ptr != NULL) && (*(char_ptr + 1) == '='))
+        {
+            char_ptr_end = strchr(char_ptr + 4, ' ');
+            for (char *ptr = (char_ptr + 4); ptr < char_ptr_end; ptr++)
+            {
+                char temp[2] = {*ptr, '\0'}; // Temporary string for the current character
+                strncat(qText, temp, 1);
+            }
+            char *endptr = NULL;
+            long int qAttempt = strtol(qText, &endptr, 10);
+
+            if (*endptr != '\0' || endptr == qText)
+            {
+                printf("Error: qText is not a valid integer\n");
+            }
+            else
+            {
+                qVal = (double)qAttempt;
+                qCount++;
+            }
+        }
+        else // Now we look for the lines only containing E- and Szz-values
+        {
+            double eVal;
+            char eText[200] = "";
+            char *E_ptr = line;
+
+            double szzVal;
+            char szzText[200] = "";
+            while (*E_ptr == ' ') // Skip leading spaces
+            {
+                E_ptr++;
+            }
+            char *Szz_ptr = strchr(E_ptr, ' '); // The next space is just before the Szz-values
+
+            // Reading the energies
+            for (char *ptr = E_ptr; ptr < Szz_ptr; ptr++)
+            {
+                char temp[2] = {*ptr, '\0'}; // Temporary string for the current character
+                strncat(eText, temp, 1);
+            }
+            char *endptr = NULL;
+            double eAttempt = strtod(eText, &endptr);
+
+            if (!(*endptr != '\0' || endptr == eText))
+            {
+
+                // Reading the Szz-values
+                char *lineEnd_ptr = strchr(Szz_ptr, '\0');
+                if (lineEnd_ptr == NULL)
+                {
+                    lineEnd_ptr = strchr(Szz_ptr, '\n');
+                }
+                for (char *ptr = Szz_ptr + 1; ptr < lineEnd_ptr; ptr++)
+                {
+                    char temp[2] = {*ptr, '\0'}; // Temporary string for the current character
+                    strncat(szzText, temp, 1);
+                }
+                endptr = NULL;
+
+                eVal = eAttempt;
+                szzVal = strtod(szzText, &endptr);
+                qList[appendCount] = qVal;
+                eList[appendCount] = eVal;
+                szzList[appendCount] = szzVal;
+                appendCount++;
+            }
+        }
+    }
+
+    // Close the file
+    fclose(file_pointer);
+
+    //Renormalizing q-space:
+    for (int i = 0; i < appendCount; i++)
+    {
+        qList[i] /= qCount;
+    }
+
+    //Renormalizing Szz-space:
+    for (int i = 0; i < appendCount; i++)
+    {
+        totSzz += szzList[i];
+    }
+
+    for (int i = 0; i < appendCount; i++)
+    {
+        szzList[i] *= qCount/totSzz; //qCount is equivalent to the number of atoms in the simulation, so now it sums up to the number of atoms.
+    }
+
+    *qArray = (double*)realloc(qList, appendCount * sizeof(*qList));
+    *eArray = (double*)realloc(eList, appendCount * sizeof(*eList));
+    *szzArray = (double*)realloc(szzList, appendCount * sizeof(*szzList));
+
+    if (*qArray == NULL || *eArray == NULL || *szzArray == NULL)
+    {
+        printf("Reallocation failed, double check arrays\n");
+        *qArray = qList;
+        *eArray = eList;
+        *szzArray = szzList;
+        free(qList);
+        free(eList);
+        free(szzList);
+    }
+
+    return appendCount;
+}
+
+int multiReadFile(const char *pattern, gsl_matrix *data_coords, gsl_matrix *data_values){
+    int totLen = 0;
+    double *qTemp = NULL;
+    double *eTemp = NULL;
+    double *szzTemp = NULL;
+
+    int addLen;
+    double minQ;
+    double maxQ;
+
+    glob_t glob_result;
+    glob(pattern, GLOB_TILDE, NULL, &glob_result);
+    size_t namesLen = glob_result.gl_pathc;
+    if (namesLen < 1) 
+    {
+        printf("No files matching pattern\n");
+        return -1;
+    }
+    const char *filenames[namesLen];
+
+    for (size_t i = 0; i < namesLen; i++)
+    {
+        filenames[i] = glob_result.gl_pathv[i];
+        addLen = readFile(filenames[i], &qTemp, &eTemp, &szzTemp);
+        find_min_max(qTemp, addLen, &minQ, &maxQ); //As the files apparently vary in whether it starts with zero or -maxQ, these are found
+        for (int j = 0; j < addLen; j++)
+        {
+            gsl_matrix_set(data_coords,totLen + j, 0, qTemp[j] - minQ);
+            gsl_matrix_set(data_coords,totLen + j, 1, eTemp[j]);
+            gsl_matrix_set(data_values,totLen + j, 0, szzTemp[j]);
+        }
+        free(qTemp);
+        free(eTemp);
+        free(szzTemp);
+        totLen += addLen;
+    }
+    globfree(&glob_result);
+    return totLen;
+}
+
+int findLength(const char *pattern){
+    int totLen = 0;
+    double *qTemp = NULL;
+    double *eTemp = NULL;
+    double *szzTemp = NULL;
+
+    int addLen;
+
+    glob_t glob_result;
+    glob(pattern, GLOB_TILDE, NULL, &glob_result);
+    size_t namesLen = glob_result.gl_pathc;
+    if (namesLen < 1) 
+    {
+        printf("No files matching pattern\n");
+        return -1;
+    }
+    const char *filenames[namesLen];
+
+    for (size_t i = 0; i < namesLen; i++)
+    {
+        filenames[i] = glob_result.gl_pathv[i];
+        addLen = readFile(filenames[i], &qTemp, &eTemp, &szzTemp);
+        
+        free(qTemp); //I have weirdly enough dynamically allocated these within readFile
+        free(eTemp);
+        free(szzTemp);
+        totLen += addLen;
+    }
+    globfree(&glob_result);
+    return totLen;
+}
+
+void physics_allocate(struct GPR_HB_1D_physics_storage_struct *physics){
+    physics->initInvMat = gsl_matrix_alloc(physics->length, physics->length);
+    physics->coords = gsl_matrix_alloc(physics->length, 2);
+    physics->values = gsl_matrix_alloc(physics->length, 1);
+    physics->noiseMat = gsl_matrix_alloc(physics->length, physics->length);
+    physics->pureCovMat = gsl_matrix_alloc(physics->length, physics->length);
+    physics->sumMat = gsl_matrix_alloc(physics->length, physics->length);
+    physics->predictionCoordsMat = gsl_matrix_alloc(1, 2);
+    physics->predictionMat = gsl_matrix_alloc(1, 1);
+    physics->covarianceMat = gsl_matrix_alloc(1, 1);
+    physics->tempMat = gsl_matrix_alloc(1, physics->length);
+    physics->transMat = gsl_matrix_alloc(physics->length, 1);
+    physics->mixCovMat = gsl_matrix_alloc(1, physics->length);
+}
+
+void physics_free(struct GPR_HB_1D_physics_storage_struct *physics){
+    gsl_matrix_free(physics->initInvMat);
+    gsl_matrix_free(physics->coords);
+    gsl_matrix_free(physics->values);
+    gsl_matrix_free(physics->noiseMat);
+    gsl_matrix_free(physics->pureCovMat);
+    gsl_matrix_free(physics->sumMat);
+    gsl_matrix_free(physics->predictionCoordsMat);
+    gsl_matrix_free(physics->predictionMat);
+    gsl_matrix_free(physics->covarianceMat);
+    gsl_matrix_free(physics->tempMat);
+    gsl_matrix_free(physics->transMat);
+    gsl_matrix_free(physics->mixCovMat);
+}
+
+int GPR_single_initialize(struct GPR_HB_1D_physics_storage_struct *physics, double noise){
+    int invertSuccess;
+
+    gsl_matrix_set_identity(physics->noiseMat); //Noise matrix becomes the identity.
+    gsl_matrix_scale(physics->noiseMat, noise); //Noise matrix is multiplied with the noise.
+    cov_matrix(physics->pureCovMat, physics->coords, physics->coords, physics->parameters);        
+    gsl_matrix_memcpy(physics->sumMat, physics->pureCovMat);
+    gsl_matrix_add(physics->sumMat, physics->noiseMat);
+
+    invertSuccess = invert_matrix(physics->sumMat, &(physics->initInvMat));
+    if (invertSuccess)
+    {
+        invertSuccess = test_inverse(physics->sumMat, physics->initInvMat, 1e-4);
+        if (!invertSuccess)
+        {
+            printf("Not inverted correctly\n");
+        }
+    }
+    else
+    {
+        printf("Inversion failed\n");
+    }
+    return invertSuccess;
+}
+
+double GPR_single_predict(double pred_Q, double pred_E, struct GPR_HB_1D_physics_storage_struct *physics){
+    double prediction = 0.0;
+    
+    if (physics->length > 0)
+    {        
+        gsl_matrix_set(physics->predictionCoordsMat, 0, 0, pred_Q);
+        gsl_matrix_set(physics->predictionCoordsMat, 0, 1, pred_E);
+
+        cov_matrix(physics->mixCovMat, physics->predictionCoordsMat, physics->coords, physics->parameters);
+
+        gsl_blas_dgemm(CblasNoTrans, CblasNoTrans, 1.0, physics->mixCovMat, physics->initInvMat, 0.0, physics->tempMat); //multiplies the mixed covariance matrix with the inverted matrix and saves in tempMat
+        gsl_blas_dgemm(CblasNoTrans, CblasNoTrans, 1.0, physics->tempMat, physics->values, 0.0, physics->predictionMat); //multiplies tempMat with the data values and saves as prediction
+
+        //This part is just for uncertainty estimation, which has not been implemented yet
+        /*
+        cov_matrix(physics->covarianceMat, physics->predictionCoordsMat, physics->predictionCoordsMat, physics->parameters);
+        gsl_matrix_transpose_memcpy(physics->transMat, physics->mixCovMat); //Transposes the already transposed mixed matrix to get the covariance
+        gsl_blas_dgemm(CblasNoTrans, CblasNoTrans, -1.0, physics->tempMat, physics->transMat, 1.0, physics->covarianceMat); //Multiplies tempmat with the covariance matrix to get the posterior covariance
+        */
+
+        prediction = gsl_matrix_get(physics->predictionMat, 0, 0);
+    }
+    else
+    {
+        printf("Issue with lengths\n");
+    }
+    
+    return prediction;
+}
+
+double eval_Sqw_GPR_HB_1D(double q, double w, struct GPR_HB_1D_physics_storage_struct *physics){
+    // Evaluate Sqw, here q should be in units of "rad", from normalizing with atom distance
+    // w is here an energy transfer in meV
+    //printf("Sqw called with q = %f and w = %e\n",q,w);
+    double prediction = GPR_single_predict(q, w, physics) * 54; //Normalization factor found from numerical integration of space
+    //printf("Uncertainty: %f\n",uncer);
+    return prediction;
+}
+
+double numerical_integral_GPR_HB_1D(double *k_initial,struct GPR_HB_1D_physics_storage_struct *physics){
+    // returns cross section for this k_i
+    
+    struct physical_constants_GPR_HB_1D *constants = &(physics->physical_constants);
+
+    double k_i_length;
+    k_i_length = sqrt(k_initial[0]*k_initial[0]+k_initial[1]*k_initial[1]+k_initial[2]*k_initial[2]);
+    
+    int theta_step,N_theta_steps=200;
+    double theta,theta_step_size,q_z;
+    
+    // Theta from 0 to Pi
+    theta_step_size = PI/N_theta_steps;
+    
+    int E_transfer_step,N_E_transfer_steps=200;
+    double E_transfer,E_transfer_step_size;
+    
+    // E_transfer [meV]
+    // k [Å^-1]
+    // Avoid transfering more energy than the ray have
+    if (PI*constants->J < k_i_length*k_i_length*K2V*K2V*VS2E)
+      // Largest omega necessary: PI*J
+      E_transfer_step_size = PI*constants->J/N_E_transfer_steps;
+    else E_transfer_step_size = k_i_length*k_i_length*K2V*K2V*VS2E/N_E_transfer_steps;
+    
+    double t_value; // length of final wavevector for certain theta/E_transfer choice.
+    
+    double integral_value = 0;
+    for (theta_step=0;theta_step<N_theta_steps;theta_step++) {
+      theta = theta_step*theta_step_size;
+      
+      for (E_transfer_step=0;E_transfer_step<N_E_transfer_steps;E_transfer_step++) {
+        E_transfer = E_transfer_step*E_transfer_step_size;
+      
+        t_value = sqrt(k_i_length*k_i_length-E_transfer*SE2V*V2K*SE2V*V2K);
+        q_z = (k_initial[2] - t_value*cos(theta))*constants->q2unit_less;
+        // May consider to translate q_z into first Brilluion zone, but not necessary
+        
+        integral_value += t_value*eval_Sqw_GPR_HB_1D(q_z,E_transfer,physics)*sin(theta)*theta_step_size*E_transfer_step_size;
+      }
+    }
+    
+    //printf("integral_value after loop = %e\n",integral_value);
+    return 2*PI*constants->integral_pre_factor*integral_value/k_i_length;
+}
+
+
+// Function for calculating my, the inverse penetration depth (for only this scattering process).
+// The input for this function and its order may not be changed, but the names may be updated.
+int GPR_HB_1D_physics_my(double *my, double *k_initial, union data_transfer_union data_transfer, struct focus_data_struct *focus_data, _class_particle *_particle) {
+    // *k_initial is a pointer to a simple vector with 3 doubles, k[0], k[1], k[2] which describes the wavevector
+
+    struct physical_constants_GPR_HB_1D *p_constants = &data_transfer.pointer_to_a_GPR_HB_1D_physics_storage_struct->physical_constants;
+    struct GPR_HB_1D_physics_storage_struct *p_physics = data_transfer.pointer_to_a_GPR_HB_1D_physics_storage_struct;
+    
+    // Need to numerically solve integral to calculate cross section
+    double cross_section = numerical_integral_GPR_HB_1D(k_initial,p_physics);
+    
+    //printf("Returned cross_section = %e\n",cross_section);
+    data_transfer.pointer_to_a_GPR_HB_1D_physics_storage_struct->current_total_cross_section = cross_section;
+    
+    // Number density given in units of 1E10*Å^-3, cross section in Å^2, returns 1/m.
+    *my = data_transfer.pointer_to_a_GPR_HB_1D_physics_storage_struct->number_density_internal*cross_section;
+    
+    //printf("Returned my = %e\n",*my);
+    return 1;
+};
+
+// Function that provides description of a basic scattering event.
+// Do not change the
+int GPR_HB_1D_physics_scattering(double *k_final, double *k_initial, double *weight, union data_transfer_union data_transfer, struct focus_data_struct *focus_data, _class_particle *_particle) {
+    
+    // Unpack the physical constants struct
+    struct physical_constants_GPR_HB_1D *p_constants = &data_transfer.pointer_to_a_GPR_HB_1D_physics_storage_struct->physical_constants;
+    struct GPR_HB_1D_physics_storage_struct *p_physics = data_transfer.pointer_to_a_GPR_HB_1D_physics_storage_struct;
+
+    // k_final and k_initial are passed as pointers to double vector[3]
+    double k_length = sqrt(k_initial[0]*k_initial[0]+k_initial[1]*k_initial[1]+k_initial[2]*k_initial[2]);
+
+    Coords r_out;
+    // choose a random direction vector in the specified focusing area
+    double solid_angle;
+    focus_data->focusing_function(&r_out,&solid_angle,focus_data);
+    NORM(r_out.x,r_out.y,r_out.z);
+
+    
+    // random energy transfer is now selected between 0 and 2*PI*J
+    // Need to ensure not transfering more energy than the ray has
+    
+    // Kim's proposal to use uniform E_transfer sampling, but will be outside of S(q,w) non-zero region often
+    double E_transfer,E_range,E_i = k_length*k_length*K2V*K2V*VS2E;
+    
+    if (PI*p_constants->J < E_i)
+      E_range = 2*PI*p_constants->J; //four-spinon limit
+    else
+      E_range = E_i;
+    
+    E_transfer = E_range*rand01();
+    
+    double k_f = sqrt(k_length*k_length - E_transfer*SE2V*V2K*SE2V*V2K);
+    
+    
+    //printf("---- E in scatter function --- \n");
+    //printf("E_initial  = %e \n",k_length*k_length*hbar*hbar*0.5/m_neutron);
+    //printf("E_initial  = %e \n",k_length*k_length*K2V*K2V*VS2E);
+    //printf("E_initial  = %e \n",E_i);
+    //printf("E_transfer = %e \n",E_transfer);
+    //printf("E_final    = %e \n",k_f*k_f*K2V*K2V*VS2E);
+    
+    k_final[0] = r_out.x*k_f; k_final[1] = r_out.y*k_f; k_final[2] = r_out.z*k_f;
+    //printf("k_final = (%lf,%lf,%lf)\n",k_final[0],k_final[1],k_final[2]);
+    
+    double q[3];
+    q[0] = k_initial[0] - k_final[0];
+    q[1] = k_initial[1] - k_final[1];
+    q[2] = k_initial[2] - k_final[2];
+    
+    double sqw_value;
+    if ((sqw_value = eval_Sqw_GPR_HB_1D(p_constants->q2unit_less*q[2],E_transfer,p_physics)) > 0) {
+      // Weight factor constants done in initialize, solid angle/ wavevector lengths and swq missing.
+      //printf("Scattering: Sqw(%f,%f) = %E \n",p_constants->q2unit_less*q[2],E_transfer,sqw_value);
+      *weight *= p_constants->integral_pre_factor*E_range*solid_angle*k_f/k_length*sqw_value/data_transfer.pointer_to_a_GPR_HB_1D_physics_storage_struct->current_total_cross_section;
+      return 1;
+    } else return 0; // Ray absorbed as Sqw == 0
+    
+    // A pointer to k_final is returned, and the wavevector will be set to k_final after a scattering event
+    //return 1; // return 1 is sucess, return 0 is failure, and the ray will be absorbed.
+              // failure should not happen, as this function will only be called when
+              // the cross section for the current k_initial is above zero.
+    
+    // There is access to the data_transfer from within the scattering function
+    // In this case the only variable is my, but it could be read by:
+    // double my = data_transfer.pointer_to_a_Template_physics_storage_struct->my_scattering;
+    // One can assume that if the scattering function is running, the my fuction was
+    //  executed just before and for the same k_initial.
+    
+};
+
+// These lines help with future error correction, and tell other Union components
+//  that at least one process have been defined.
+#ifndef PROCESS_DETECTOR
+    // Obsolete
+    //struct pointer_to_global_process_list global_process_list = {0,NULL};
+    #define PROCESS_DETECTOR dummy
+#endif
+
+#ifndef PROCESS_GPR_HB_1D_DETECTOR
+    #define PROCESS_GPR_HB_1D_DETECTOR dummy
+#endif
+%}
+
+DECLARE
+%{
+// Declare for this component, to do calculations on the input / store in the transported data
+struct GPR_HB_1D_physics_storage_struct GPR_HB_1D_storage; // Replace template with your own name here
+
+// Variables needed in initialize of this function.
+double effective_my_scattering;
+
+// Needed for transport to the main component, will be the same for all processes
+struct global_process_element_struct global_process_element;
+struct scattering_process_struct This_process;
+%}
+
+INITIALIZE
+%{
+  
+  if ((unit_cell_volume==0) && (number_density==0)) {
+    printf("ERROR in Union process GPR_HB_1D named %s, set either unit_cell_volume or number_density.\n",NAME_CURRENT_COMP);
+    exit(1);
+  }
+  
+  if ((unit_cell_volume>0) && (number_density>0)) {
+    printf("ERROR in Union process GPR_HB_1D named %s, only set one of unit_cell_volume or number_density.\n",NAME_CURRENT_COMP);
+    exit(1);
+  }
+  
+  if (unit_cell_volume>0) number_density = 1/unit_cell_volume; // Unit of 1/Å^3
+  
+  // Packing factor taken into account by decreasing number density
+  number_density = number_density*packing_factor;
+
+  //Initializing the Gaussian process regression
+  //char *pattern = "./12x1x1_antiRedo.f2.m0.szz";
+  GPR_HB_1D_storage.length = findLength(pattern); 
+  physics_allocate(&GPR_HB_1D_storage);
+  multiReadFile(pattern, GPR_HB_1D_storage.coords, GPR_HB_1D_storage.values);
+  GPR_HB_1D_storage.parameters[0] = covariance_parameter;
+  GPR_HB_1D_storage.parameters[1] = cov_coherence_parameter;
+  GPR_single_initialize(&GPR_HB_1D_storage, noise_value);
+  
+  
+  GPR_HB_1D_storage.physical_constants.q2unit_less = atom_distance;
+  GPR_HB_1D_storage.number_density_internal = number_density*1E10; // Unit conversion so n*sigma gets units of 1/m.
+  
+  GPR_HB_1D_storage.physical_constants.J = J_interaction;
+  GPR_HB_1D_storage.physical_constants.Atom_dist = atom_distance;
+  GPR_HB_1D_storage.physical_constants.noise = noise_value;
+  
+  // prefactor 0.5
+  // Integral pre factors is (gyromagnetic ratio * r_0 * g)^2
+  // gyromagnetic ratio = -1.913 [unitless]
+  // classical electron radius = 2.817940E-15 [m] -> Å = 2.817940E-5 [Å]
+  // g factor for electron = 2.0023 [unitless]
+  
+  //GPR_HB_1D_storage.physical_constants.integral_pre_factor = 1.832471E8*1.832471E8*2.81794E-15*2.81794E-15*2.0023*2.0023;
+  GPR_HB_1D_storage.physical_constants.integral_pre_factor = 0.5*1.913*1.913*2.81794E-5*2.81794E-5*2.0023*2.0023;
+  
+  // Factor: 0.5
+  // Focusing area correction: done in direction choice
+  // Energy range correction: done in code
+  // Scattering density: 1/V0 = number_density
+  // Constant term in diff cross section: integral_pre_factor (calculated in initialize)
+  // 1E10 to make units of weight factor from Å to m.
+  
+  //GPR_HB_1D_storage.physical_constants.weight_factor = 1E10*number_density*GPR_HB_1D_storage.physical_constants.integral_pre_factor;
+  //GPR_HB_1D_storage.physical_constants.weight_factor = GPR_HB_1D_storage.physical_constants.integral_pre_factor;
+  
+  // Need to specify if this process is isotropic
+  //This_process.non_isotropic_rot_index = -1; // Yes (powder)
+  This_process.non_isotropic_rot_index =  1;  // No (single crystal)
+
+  // The type of the process must be saved in the global enum process
+  This_process.eProcess = GPR_HB_1D;
+
+  // Packing the data into a structure that is transported to the main component
+  This_process.data_transfer.pointer_to_a_GPR_HB_1D_physics_storage_struct = &GPR_HB_1D_storage;
+  This_process.probability_for_scattering_function = &GPR_HB_1D_physics_my;
+  This_process.scattering_function = &GPR_HB_1D_physics_scattering;
+
+  // This will be the same for all process's, and can thus be moved to an include.
+  sprintf(This_process.name,NAME_CURRENT_COMP);
+  This_process.process_p_interact = interact_fraction;
+  rot_copy(This_process.rotation_matrix,ROT_A_CURRENT_COMP);
+  sprintf(global_process_element.name,NAME_CURRENT_COMP);
+  global_process_element.component_index = INDEX_CURRENT_COMP;
+  global_process_element.p_scattering_process = &This_process;
+  
+  struct pointer_to_global_process_list *global_process_list = COMP_GETPAR3(Union_init, init, global_process_list);
+  add_element_to_process_list(global_process_list,global_process_element);
+ %}
+
+TRACE
+%{
+    // Trace should be empty, the simulation is done in Union_master
+%}
+
+FINALLY
+%{
+    physics_free(&GPR_HB_1D_storage);
+%}
+
+END
