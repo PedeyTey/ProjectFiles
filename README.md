@@ -1,1 +1,1 @@
-# ProjectFiles
+This is just a simple little github for the most important files of my master's thesis
