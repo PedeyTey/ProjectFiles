@@ -1,1 +1,1 @@
-This is just a simple little github for the most important files of my master's thesis
+This is just a simple little repository for the most important files of my master's thesis
