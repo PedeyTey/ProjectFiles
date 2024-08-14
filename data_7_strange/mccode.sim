@@ -1,0 +1,141 @@
+McStas simulation description file for 1D_GPR_HB_demonstration.
+Date:    Thu Aug  8 21:07:38 2024
+Program: McStas 3.4 - Sep. 19, 2023
+
+begin instrument: 1D_GPR_HB_demonstration
+  File: data_7_strange/mccode
+  Source: 1D_GPR_HB_demonstration.instr
+  Parameters:  A3(double) atom_distance(double) sample_radius(double) sample_height(double) pack(double) geometry_interact(double)
+  Trace_enabled: yes
+  Default_main: yes
+  Embedded_runtime: yes
+end instrument
+
+begin simulation: data_7_strange
+  Format: McCode with text headers
+  URL: http://www.mccode.org
+  Creator: McStas 3.4 - Sep. 19, 2023
+  Instrument: 1D_GPR_HB_demonstration.instr
+  Ncount: 20000000
+  Trace: no
+  Gravitation: no
+  Seed: 1723144058587309
+  Directory: data_7_strange
+  Nodes: 960
+  Param: A3=0
+  Param: atom_distance=1.3
+  Param: sample_radius=0.01
+  Param: sample_height=0.01
+  Param: pack=1
+  Param: geometry_interact=0.2
+end simulation
+
+begin data
+  Date: Fri Aug  9 11:27:56 2024 (1723195676)
+  type: array_2d(181, 201)
+  Source: 1D_GPR_HB_demonstration (1D_GPR_HB_demonstration.instr)
+  component: detector_2theta_E_single
+  position: 0 0 1
+  title:  Intensity Angle Energy Monitor (Banana) [out] per bin
+  Ncount: 19999680
+  filename: 2theta_E_single.dat
+  statistics: X0=19.8485; dX=12.3108; Y0=23.6807; dY=0.67702;
+  signal: Min=0; Max=0.0190836; Mean=9.66362e-05;
+  values: 3.51572 0.0166688 235123
+  xvar: Lo
+  yvar: En
+  xlabel: Longitude [deg]
+  ylabel: Energy [meV]
+  zvar: I
+  zlabel: Signal per bin
+  xylimits: 0 180 10 50
+  variables: I I_err N
+end data
+
+begin data
+  Date: Fri Aug  9 11:27:56 2024 (1723195676)
+  type: array_2d(181, 201)
+  Source: 1D_GPR_HB_demonstration (1D_GPR_HB_demonstration.instr)
+  component: detector_2theta_E
+  position: 0 0 1
+  title:  Intensity Angle Energy Monitor (Banana) [out] per bin
+  Ncount: 19999680
+  filename: 2theta_E.dat
+  statistics: X0=20.8128; dX=12.6796; Y0=23.5513; dY=0.781964;
+  signal: Min=0; Max=0.0284295; Mean=0.00013132;
+  values: 4.77755 0.0270105 355427
+  xvar: Lo
+  yvar: En
+  xlabel: Longitude [deg]
+  ylabel: Energy [meV]
+  zvar: I
+  zlabel: Signal per bin
+  xylimits: 0 180 10 50
+  variables: I I_err N
+end data
+
+begin data
+  Date: Fri Aug  9 11:27:56 2024 (1723195676)
+  type: array_2d(180, 180)
+  Source: 1D_GPR_HB_demonstration (1D_GPR_HB_demonstration.instr)
+  component: m4pi
+  position: 0 0 1
+  title: 4PI PSD monitor
+  Ncount: 19999680
+  filename: 4Pi_events.dat
+  statistics: X0=-0.0117496; dX=10.2634; Y0=0.465049; dY=9.74153;
+  signal: Min=0; Max=30.5101; Mean=0.00235963;
+  values: 76.452 0.131165 1.80346e+07
+  xvar: Lo
+  yvar: La
+  xlabel: Longitude [deg]
+  ylabel: Latitude [deg]
+  zvar: I
+  zlabel: Signal per bin
+  xylimits: -180 180 -90 90
+  variables: I I_err N
+end data
+
+begin data
+  Date: Fri Aug  9 11:27:56 2024 (1723195676)
+  type: array_2d(180, 180)
+  Source: 1D_GPR_HB_demonstration (1D_GPR_HB_demonstration.instr)
+  component: m4pi_scat
+  position: 0 0 1
+  title: 4PI PSD monitor
+  Ncount: 19999680
+  filename: 4Pi_events_scat.dat
+  statistics: X0=-0.0581812; dX=22.7488; Y0=0.32698; dY=21.6738;
+  signal: Min=0; Max=0.124843; Mean=0.000476659;
+  values: 15.4437 0.130275 2.0349e+06
+  xvar: Lo
+  yvar: La
+  xlabel: Longitude [deg]
+  ylabel: Latitude [deg]
+  zvar: I
+  zlabel: Signal per bin
+  xylimits: -180 180 -90 90
+  variables: I I_err N
+end data
+
+begin data
+  Date: Fri Aug  9 11:27:56 2024 (1723195676)
+  type: array_2d(100, 100)
+  Source: 1D_GPR_HB_demonstration (1D_GPR_HB_demonstration.instr)
+  component: PSD_transmission
+  position: 0 0 1.5
+  title: PSD monitor
+  Ncount: 19999680
+  filename: transmitted.dat
+  statistics: X0=1.30303e-06; dX=0.053519; Y0=-2.20195e-05; dY=0.0535205;
+  signal: Min=0; Max=14.7128; Mean=0.00610083;
+  values: 61.0083 0.0152522 1.59997e+07
+  xvar: X 
+  yvar: Y 
+  xlabel: X position [cm]
+  ylabel: Y position [cm]
+  zvar: I
+  zlabel: Signal per bin
+  xylimits: -5 5 -5 5
+  variables: I I_err N
+end data
