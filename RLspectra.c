@@ -29,7 +29,7 @@
 #define DEFAULT_PRECISION 1e-8
 #define MASS 1
 #define STEP_SIZE 0.1
-#define NUM_STEPS 1000
+#define NUM_STEPS 100
 #define NUM_SAMPLES 1000
 
 const char *pattern = "./12x1x1_antiSim.f2.m0.szz";
@@ -445,10 +445,6 @@ void leapfrog(double (*parameters)[DIMENSION], double (*momentum)[DIMENSION], do
     gsl_matrix *sumMat = gsl_matrix_alloc((*pureCovMat)->size1, (*pureCovMat)->size2);
     int invertSuccess;
 
-    // Initial half-step for momentum
-    for (int i = 0; i < DIMENSION; i++) {
-        *(momentum[i]) -= 0.5 * STEP_SIZE * gsl_matrix_get(*gradient, i, 0);
-    }
 
     // Full steps for position and momentum
     for (int i = 0; i < DIMENSION; i++) {
@@ -463,9 +459,6 @@ void leapfrog(double (*parameters)[DIMENSION], double (*momentum)[DIMENSION], do
     invertSuccess = invert_matrix(sumMat, initInvMat);
     *loglikelihood = GPR_logLikelihood(sumMat, *initInvMat, data_values);
     GPR_loglikelihoodGrad(gradient, *pureCovMat, *initInvMat, x_values, data_values, *parameters);
-    
-    for (int i = 0; i < DIMENSION; i++) {
-        *momentum[i] -= 0.5 * STEP_SIZE * gsl_matrix_get(*gradient, i, 0);
     }
     gsl_matrix_free(sumMat);
 }
@@ -504,7 +497,7 @@ double hmc_sample(double **parameters, gsl_matrix *x_values, gsl_matrix *data_va
     {
         for (int i = 0; i < DIMENSION; i++) 
         {
-            current_sample[i] = gsl_ran_gaussian(rng, 1.0) + (*parameters)[i]; // Initialize parameters gaussian distributed around the initial guess on parameters
+            current_sample[i] = (*parameters)[i]; // Initialize parameters as last parameters
             current_momentum[i] = gsl_ran_gaussian(rng, 1.0); // Initialize momentum from standard normal distribution
         }
 
@@ -529,30 +522,42 @@ double hmc_sample(double **parameters, gsl_matrix *x_values, gsl_matrix *data_va
     }
 
     GPR_loglikelihoodGrad(&gradient, pureCovMat, initInvMat, x_values, data_values, *parameters);
-
+    
+    // Save current sample and momentum
+    for (int j = 0; j < DIMENSION; j++) {
+        proposed_sample[j] = current_sample[j];
+        proposed_momentum[j] = current_momentum[j];
+    }
+    double oldLogLikelihood = loglikelihood;
+    
     // Hamiltonian dynamics simulation using leapfrog integration
+    
+    // Initial half-step for momentum
+    for (int i = 0; i < DIMENSION; i++) {
+        proposed_momentum[i] -= 0.5 * STEP_SIZE * gsl_matrix_get(gradient, i, 0);
+    }
     for (int i = 0; i < NUM_STEPS; i++) {
-        // Save current sample and momentum
-        for (int j = 0; j < DIMENSION; j++) {
-            proposed_sample[j] = current_sample[j];
-            proposed_momentum[j] = current_momentum[j];
-        }
+        
         // Perform leapfrog integration
-        double oldLogLikelihood = loglikelihood;
         leapfrog(&proposed_sample, &proposed_momentum, &loglikelihood, &gradient, &pureCovMat, &initInvMat, noiseMat, x_values, data_values);
+    }
 
-        // Metropolis-Hastings acceptance step
-        double current_H = kinetic_energy(current_momentum) + oldLogLikelihood;
-        double proposed_H = kinetic_energy(proposed_momentum) + loglikelihood;
-        double acceptance_prob = exp(current_H - proposed_H);
-        if ((gsl_rng_uniform(rng) < acceptance_prob) && !(isnan(loglikelihood))) {
-            // Accept proposed sample
-            for (int j = 0; j < DIMENSION; j++) {
-                current_sample[j] = proposed_sample[j];
-                current_momentum[j] = proposed_momentum[j];
-            }
+    // Final half-step for momentum
+    for (int i = 0; i < DIMENSION; i++) {
+        proposed_momentum[i] -= 0.5 * STEP_SIZE * gsl_matrix_get(gradient, i, 0);
+    
+    // Metropolis-Hastings acceptance step
+    double current_H = kinetic_energy(current_momentum) + oldLogLikelihood;
+    double proposed_H = kinetic_energy(proposed_momentum) + loglikelihood;
+    double acceptance_prob = exp(current_H - proposed_H);
+    if ((gsl_rng_uniform(rng) < acceptance_prob) && !(isnan(loglikelihood))) {
+        // Accept proposed sample
+        for (int j = 0; j < DIMENSION; j++) {
+            current_sample[j] = proposed_sample[j];
+            current_momentum[j] = proposed_momentum[j];
         }
     }
+    
     // Save the final sample
     for (int i = 0; i < DIMENSION; i++) {
         (*parameters)[i] = current_sample[i];
