@@ -79,6 +79,7 @@ double matrix_trace(gsl_matrix *m);
 double kinetic_energy(double *p);
 double gaussianFunc(double distance_squared, double sigma);
 double mean(double* array, int length);
+double gsl_mean(gsl_matrix);
 void find_min_max(double* array, int length, double* min, double* max);
 double matDet(gsl_matrix* m);
 int invert_matrix(gsl_matrix *m, gsl_matrix **inverse);
@@ -103,6 +104,14 @@ double mean(double* array, int length) {
     }
     return sum / length;
 }
+
+double gsl_mean(gsl_matrix *matrix) {
+    double sum = 0.0;
+    int length = matrix->size1;
+    for(int i = 0; i < length; i++) {
+        sum += gsl_matrix_get(matrix, i, 0);
+    }
+    return sum / length;
 
 void find_min_max(double* array, int length, double* min, double* max)
 {
@@ -604,7 +613,7 @@ void GPR_predict(gsl_matrix** prediction, gsl_matrix **postCovMat, gsl_matrix* p
 
         for (int i = 0; i < len; i++)
         {
-            gsl_matrix_set(logValues, i, 0, log1p(gsl_matrix_get(data_values, i, 0)));
+            gsl_matrix_set(logValues, i, 0, log1p(gsl_matrix_get(data_values, i, 0) - gsl_mean(data_values)));
         }
 
         gsl_matrix_set_identity(noiseMat); //Noise matrix becomes the identity.
@@ -698,6 +707,7 @@ void GPR_single_predict(gsl_matrix** prediction, gsl_matrix **post_cov_mat, gsl_
     {
         // gsl_matrix *tempVec = gsl_matrix_alloc(len, 1);
         gsl_matrix *tempMat = gsl_matrix_alloc(predLen, len);
+        gsl_matrix *regressionValues = gsl_matrix_alloc(len, 1);
         gsl_matrix *transMat = gsl_matrix_alloc(len, predLen);
         gsl_matrix *pureCovMat = gsl_matrix_alloc(len, len);
         gsl_matrix *noiseMat = gsl_matrix_alloc(len, len);
@@ -715,18 +725,29 @@ void GPR_single_predict(gsl_matrix** prediction, gsl_matrix **post_cov_mat, gsl_
             GPR_single_initialize(inv_init_cov, noiseMat, data_coords, parameters);
             *first_time = false;
         }
+        
+        for (int i = 0; i < len; i++)
+        {
+            gsl_matrix_set(regressionValues, i, 0, log1p(gsl_matrix_get(data_values, i, 0) - gsl_mean(data_values)));
+        }
 
         gsl_blas_dgemm(CblasNoTrans, CblasNoTrans, 1.0, mixCovMat, *inv_init_cov, 0.0, tempMat); //multiplies the mixed covariance matrix with the inverted matrix and saves in tempMat
-        gsl_blas_dgemm(CblasNoTrans, CblasNoTrans, 1.0, tempMat, data_values, 0.0, *prediction); //multiplies tempMat with the data values and saves as prediction
+        gsl_blas_dgemm(CblasNoTrans, CblasNoTrans, 1.0, tempMat, regressionValues, 0.0, *prediction); //multiplies tempMat with the data values and saves as prediction
 
         gsl_matrix_transpose_memcpy(transMat, mixCovMat); //Transposes the already transposed mixed matrix to get the covariance
         gsl_blas_dgemm(CblasNoTrans, CblasNoTrans, -1.0, tempMat, transMat, 1.0, *post_cov_mat); //multiplies the mixed covariance matrix with tempVec from before and saves as prediction
+
+        for (int i = 0; i < predLen; i++)
+        {
+            gsl_matrix_set(*prediction, i, 0, exp(gsl_matrix_get(*prediction, i, 0) - 1));
+        }
 
 
 
         // gsl_matrix_free(tempVec);
         gsl_matrix_free(pureCovMat);
         gsl_matrix_free(noiseMat);
+        gsl_matrix_free(regressionValues)
         gsl_matrix_free(sumMat);
         gsl_matrix_free(mixCovMat);
         gsl_matrix_free(tempMat);
